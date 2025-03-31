@@ -1,0 +1,43 @@
+# Scraper Configuration
+
+# Storage settings
+storage:
+  type: "csv"  # Options: "csv", "supabase"
+  csv:
+    output_dir: "data"
+    filename_prefix: "products"
+  supabase:
+    table_name: "products"
+
+# Common scraper settings
+scraper:
+  # Which scraper to use: "oda" or "meny"
+  type: "meny"  #"oda"
+  request_delay: 0.5  # Delay between requests in seconds
+  max_retries: 3
+  timeout: 30
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36"
+
+  # Oda-specific settings
+  oda:
+    base_url: "https://oda.com"
+    categories:
+      - name: "meieri-ost-og-egg"
+        url: "/no/categories/1283-meieri-ost-og-egg/"
+
+  # Meny-specific settings
+  meny:
+    base_url: "https://meny.no"
+    categories:
+      - name: "meieri-egg"
+        url: "/varer/meieri-egg/"
+    # Meny uses a "Vis flere" (show more) button - this is the max products per page
+    products_per_page: 24
+    # Maximum number of pages to load (safety limit)
+    max_pages: 20
+
+# Logging
+logging:
+  level: "INFO"  # Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+  file: "logs/scraper.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
