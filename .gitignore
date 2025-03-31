@@ -33,7 +33,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-
+*.xml
 # Virtual Environment
 venv/
 ENV/
