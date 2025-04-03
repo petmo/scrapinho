@@ -1,9 +1,11 @@
-"""CSV storage implementation for the Oda scraper."""
+"""CSV storage implementation for the grocery scraper."""
 
 import os
 import csv
 import logging
 import datetime
+import tempfile
+import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -14,7 +16,7 @@ from storage.base_storage import BaseStorage
 
 
 class CSVStorage(BaseStorage):
-    """CSV storage backend for the Oda scraper.
+    """CSV storage backend for the grocery product scraper.
 
     This class implements the BaseStorage interface for storing products in CSV files.
 
@@ -24,7 +26,7 @@ class CSVStorage(BaseStorage):
     """
 
     def __init__(
-        self, output_dir: str = "data", filename_prefix: str = "oda_products"
+        self, output_dir: str = "data", filename_prefix: str = "products"
     ) -> None:
         """Initialize the CSV storage backend.
 
@@ -59,22 +61,26 @@ class CSVStorage(BaseStorage):
         filename = f"{self.filename_prefix}{category_part}_{today}.csv"
         return os.path.join(self.output_dir, filename)
 
-    def save_product(self, product: Product) -> bool:
+    def save_product(self, product: Product, replace_existing: bool = False) -> bool:
         """Save a single product to a CSV file.
 
         Args:
             product: The product to save
+            replace_existing: Whether to replace an existing product with the same ID
 
         Returns:
             True if the product was saved successfully, False otherwise
         """
-        return self.save_products([product])
+        return self.save_products([product], replace_existing)
 
-    def save_products(self, products: List[Product]) -> bool:
+    def save_products(
+        self, products: List[Product], replace_existing: bool = False
+    ) -> bool:
         """Save multiple products to a CSV file.
 
         Args:
             products: The list of products to save
+            replace_existing: Whether to replace existing products with the same ID
 
         Returns:
             True if all products were saved successfully, False otherwise
@@ -95,21 +101,84 @@ class CSVStorage(BaseStorage):
             # Save each category to a separate file
             for category, category_products in products_by_category.items():
                 filename = self._get_current_filename(category)
-                file_exists = os.path.exists(filename)
 
-                with open(filename, mode="a", newline="", encoding="utf-8") as file:
-                    writer = csv.DictWriter(
-                        file, fieldnames=list(category_products[0].keys())
-                    )
-                    if not file_exists:
-                        writer.writeheader()
-                    writer.writerows(category_products)
+                if replace_existing and os.path.exists(filename):
+                    # Load existing file and replace or append products
+                    self._replace_or_append_products(filename, category_products)
+                else:
+                    # Just append to file (or create new)
+                    file_exists = os.path.exists(filename)
+                    with open(filename, mode="a", newline="", encoding="utf-8") as file:
+                        writer = csv.DictWriter(
+                            file, fieldnames=list(category_products[0].keys())
+                        )
+                        if not file_exists:
+                            writer.writeheader()
+                        writer.writerows(category_products)
 
             self.logger.info(f"Saved {len(products)} products to CSV files")
             return True
         except Exception as e:
             self.logger.error(f"Failed to save products to CSV: {e}")
             return False
+
+    def _replace_or_append_products(
+        self, filename: str, new_products: List[Dict]
+    ) -> None:
+        """Replace or append products in a CSV file.
+
+        Args:
+            filename: Path to the CSV file
+            new_products: New products to save
+        """
+        temp_file = tempfile.NamedTemporaryFile(
+            mode="w", delete=False, newline="", encoding="utf-8"
+        )
+
+        try:
+            # Create a dictionary of new products indexed by product_id
+            new_products_dict = {p["product_id"]: p for p in new_products}
+
+            # Keep track of products we've written
+            written_product_ids = set()
+
+            # Read the existing file
+            with open(filename, "r", newline="", encoding="utf-8") as csv_file:
+                reader = csv.DictReader(csv_file)
+
+                # Set up the writer with the same fieldnames
+                writer = csv.DictWriter(temp_file, fieldnames=reader.fieldnames)
+                writer.writeheader()
+
+                # Process each existing row
+                for row in reader:
+                    product_id = row["product_id"]
+
+                    # If this product is in our new products, replace it
+                    if product_id in new_products_dict:
+                        writer.writerow(new_products_dict[product_id])
+                        written_product_ids.add(product_id)
+                    else:
+                        # Otherwise keep the existing row
+                        writer.writerow(row)
+
+            # Add any new products that weren't replacements
+            for product_id, product in new_products_dict.items():
+                if product_id not in written_product_ids:
+                    writer.writerow(product)
+
+            # Close the temp file
+            temp_file.close()
+
+            # Replace the original file with the temp file
+            shutil.move(temp_file.name, filename)
+
+        except Exception as e:
+            # Clean up the temp file
+            temp_file.close()
+            if os.path.exists(temp_file.name):
+                os.unlink(temp_file.name)
+            raise e
 
     def get_product(self, product_id: str) -> Optional[Product]:
         """Retrieve a product by its ID.
@@ -144,6 +213,7 @@ class CSVStorage(BaseStorage):
                         scraped_at=datetime.datetime.fromisoformat(
                             product_dict["scraped_at"]
                         ),
+                        run_id=product_dict.get("run_id"),
                     )
             return None
         except Exception as e:
@@ -154,6 +224,7 @@ class CSVStorage(BaseStorage):
         self,
         category: Optional[str] = None,
         subcategory: Optional[str] = None,
+        run_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[Product]:
         """Retrieve products with optional filtering.
@@ -161,6 +232,7 @@ class CSVStorage(BaseStorage):
         Args:
             category: Filter by category
             subcategory: Filter by subcategory
+            run_id: Filter by run ID
             limit: Maximum number of products to return
 
         Returns:
@@ -171,7 +243,9 @@ class CSVStorage(BaseStorage):
             # Determine which files to search
             if category:
                 files = list(
-                    Path(self.output_dir).glob(f"{self.filename_prefix}_{category}_*.csv")
+                    Path(self.output_dir).glob(
+                        f"{self.filename_prefix}_{category}_*.csv"
+                    )
                 )
             else:
                 files = list(Path(self.output_dir).glob(f"{self.filename_prefix}*.csv"))
@@ -179,8 +253,13 @@ class CSVStorage(BaseStorage):
             # Read and filter products
             for file in files:
                 df = pd.read_csv(file)
-                if subcategory:
+
+                # Apply filters
+                if subcategory and "subcategory" in df.columns:
                     df = df[df["subcategory"] == subcategory]
+
+                if run_id and "run_id" in df.columns:
+                    df = df[df["run_id"] == run_id]
 
                 # Apply limit if needed
                 if limit is not None and len(products) + len(df) > limit:
@@ -206,6 +285,7 @@ class CSVStorage(BaseStorage):
                             scraped_at=datetime.datetime.fromisoformat(
                                 product_dict["scraped_at"]
                             ),
+                            run_id=product_dict.get("run_id"),
                         )
                     )
 

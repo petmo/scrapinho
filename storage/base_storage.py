@@ -1,4 +1,4 @@
-"""Base storage interface for the Oda scraper."""
+"""Base storage interface for the grocery scraper."""
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
@@ -22,11 +22,12 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
-    def save_product(self, product: Product) -> bool:
+    def save_product(self, product: Product, replace_existing: bool = False) -> bool:
         """Save a single product to the storage backend.
 
         Args:
             product: The product to save
+            replace_existing: Whether to replace existing product with same ID
 
         Returns:
             True if the product was saved successfully, False otherwise
@@ -34,11 +35,14 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
-    def save_products(self, products: List[Product]) -> bool:
+    def save_products(
+        self, products: List[Product], replace_existing: bool = False
+    ) -> bool:
         """Save multiple products to the storage backend.
 
         Args:
             products: The list of products to save
+            replace_existing: Whether to replace existing products with same IDs
 
         Returns:
             True if all products were saved successfully, False otherwise
@@ -62,6 +66,7 @@ class BaseStorage(ABC):
         self,
         category: Optional[str] = None,
         subcategory: Optional[str] = None,
+        run_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> List[Product]:
         """Retrieve products with optional filtering.
@@ -69,6 +74,7 @@ class BaseStorage(ABC):
         Args:
             category: Filter by category
             subcategory: Filter by subcategory
+            run_id: Filter by run ID
             limit: Maximum number of products to return
 
         Returns:

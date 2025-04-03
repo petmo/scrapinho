@@ -1,4 +1,4 @@
-"""Product data model for the Oda scraper."""
+"""Product data model for the grocery scraper."""
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional
@@ -22,6 +22,7 @@ class Product:
         url: Product page URL
         attributes: Additional product attributes
         scraped_at: Timestamp when the product was scraped
+        run_id: ID of the scraping run that produced this product
     """
 
     product_id: str
@@ -37,6 +38,7 @@ class Product:
     url: Optional[str] = None
     attributes: Dict[str, Any] = field(default_factory=dict)
     scraped_at: datetime = field(default_factory=datetime.now)
+    run_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert Product to dictionary.
@@ -58,4 +60,5 @@ class Product:
             "url": self.url,
             "attributes": self.attributes,
             "scraped_at": self.scraped_at.isoformat(),
+            "run_id": self.run_id,
         }

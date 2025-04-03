@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """Main entry point for the grocery product scraper."""
 
-import os
-import sys
-import logging
 import argparse
+import logging
+import sys
+import json
 from pathlib import Path
-from typing import Dict, Any
 
 import yaml
 from box import Box
 from dotenv import load_dotenv
 
-from pipelines import get_pipeline
+from scraper import create_scraper
+from processing import get_processor
+from storage import save_to_storage
 from scraper.logger import setup_logging
+from utils.run_id import generate_run_id, format_run_id
+from storage.supabase_storage import SupabaseStorage
 
 
-def load_config(config_path: str = "config.yaml") -> Box:
-    """Load configuration from YAML file.
-
-    Args:
-        config_path: Path to configuration file
-
-    Returns:
-        Box object with configuration
-    """
+def load_config(config_path="config.yaml"):
+    """Load configuration from YAML file."""
     try:
         with open(config_path, "r") as file:
             config = yaml.safe_load(file)
@@ -34,103 +30,130 @@ def load_config(config_path: str = "config.yaml") -> Box:
         sys.exit(1)
 
 
-def run_scraper(
-    config: Box, category_url: str = None, max_products: int = None, debug: bool = False
-) -> None:
-    """Run the scraper with configured pipeline.
+def get_categories(config, scraper_type, provided_url=None):
+    """Get list of categories to scrape.
 
     Args:
         config: Configuration object
-        category_url: URL of the category to scrape, if not using config
-        max_products: Maximum number of products to scrape per subcategory
-        debug: Whether to run in debug mode
+        scraper_type: Type of scraper ('oda' or 'meny')
+        provided_url: Optional specific URL provided by command line
+
+    Returns:
+        List of dictionaries with category name and URL
     """
-    logger = logging.getLogger(__name__)
+    # If a specific URL is provided, use only that
+    if provided_url:
+        # Try to extract name from URL
+        url_parts = provided_url.rstrip("/").split("/")
+        name = url_parts[-1] if url_parts else "custom-category"
+        return [{"name": name, "url": provided_url}]
 
-    # Set debug mode in configuration if enabled
-    if debug:
-        logger.info("Running in DEBUG mode - more detailed logging will be displayed")
-        # Reduce request delay in debug mode for faster testing
-        config.scraper.request_delay = 0.2
+    # Get categories from configuration
+    scraper_config = config.scraper.get(scraper_type, {})
+    categories = scraper_config.get("categories", [])
 
-    # Determine which pipeline to use
-    pipeline_type = config.scraper.type
-    logger.info(f"Using {pipeline_type} pipeline")
+    # Make sure base_url is applied
+    base_url = scraper_config.get("base_url")
+    if base_url:
+        for category in categories:
+            if category.get("url") and not category["url"].startswith(
+                ("http://", "https://")
+            ):
+                category["url"] = f"{base_url}{category['url']}"
 
+    return categories
+
+
+def add_run_id_to_products(products, run_id):
+    """Add run ID to all products."""
+    for product in products:
+        product.run_id = run_id
+    return products
+
+
+def track_run_with_supabase(
+    config,
+    run_id,
+    scraper_type,
+    category_name,
+    category_url,
+    max_products=None,
+    replace=False,
+):
+    """Initialize run tracking with Supabase.
+
+    Args:
+        config: Configuration object
+        run_id: Run ID to track
+        scraper_type: Type of scraper being used
+        category_name: Name of the category
+        category_url: URL being scraped
+        max_products: Maximum number of products
+        replace: Whether we're replacing existing products
+
+    Returns:
+        SupabaseStorage instance if successful, None otherwise
+    """
     try:
-        # Create and run the pipeline
-        pipeline = get_pipeline(pipeline_type, config)
+        # Only if we're using Supabase storage
+        if config.storage.type.lower() != "supabase":
+            return None
 
-        # Determine category URL to scrape
-        if category_url is None:
-            # Get from configuration
-            scraper_config = config.scraper.get(pipeline_type, {})
-            categories = scraper_config.get("categories", [])
-            if not categories:
-                logger.error("No categories specified in configuration")
-                return
+        storage_config = config.storage.get("supabase", {})
+        supabase = SupabaseStorage(**storage_config)
+        supabase.initialize()
 
-            category = categories[0]
-            category_url = category.url
-            logger.info(f"Using category from config: {category.name} ({category_url})")
-        else:
-            logger.info(f"Using provided category URL: {category_url}")
+        # Create a simplified config snapshot (removing sensitive info)
+        config_snapshot = {
+            "scraper": {
+                "type": scraper_type,
+                "request_delay": config.scraper.get("request_delay"),
+                "max_retries": config.scraper.get("max_retries"),
+            },
+            "category": category_name,
+        }
 
-        # Ensure category URL is absolute
-        base_url = config.scraper.get(pipeline_type, {}).get("base_url")
-        if base_url and not category_url.startswith(("http://", "https://")):
-            category_url = f"{base_url}{category_url}"
+        # Record run start
+        supabase.start_run(
+            run_id=run_id,
+            scraper_type=scraper_type,
+            category_url=category_url,
+            max_products=max_products,
+            replace_existing=replace,
+            config=config_snapshot,
+        )
 
-        # Run the pipeline
-        products = pipeline.run_pipeline(category_url, max_products)
-        logger.info(f"Pipeline completed with {len(products)} products processed")
-
+        return supabase
     except Exception as e:
-        logger.error(f"Scraper encountered an error: {e}", exc_info=True)
+        logging.error(f"Failed to initialize run tracking: {e}")
+        return None
 
 
-def main() -> None:
+def main():
     """Main entry point."""
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description="Grocery Product Scraper")
-
     parser.add_argument(
-        "-c", "--config", default="config.yaml", help="Path to configuration file"
+        "-c", "--config", default="config.yaml", help="Configuration file path"
     )
-
     parser.add_argument(
-        "-u", "--category", help="URL of the category to scrape (overrides config)"
+        "-u", "--category", help="Specific category URL to scrape (overrides config)"
     )
-
     parser.add_argument(
-        "-m",
-        "--max-products",
-        type=int,
-        help="Maximum products to scrape per subcategory",
+        "-m", "--max-products", type=int, help="Maximum products to scrape per category"
     )
-
+    parser.add_argument("-d", "--debug", action="store_true", help="Enable debug mode")
     parser.add_argument(
-        "-l",
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Logging level",
+        "-s", "--scraper", choices=["oda", "meny"], help="Scraper type to use"
     )
-
+    parser.add_argument("--run-id", help="Specify a run ID, otherwise auto-generated")
+    parser.add_argument("--seed", help="Seed for generating deterministic run ID")
     parser.add_argument(
-        "-d",
-        "--debug",
-        action="store_true",
-        help="Enable debug mode (equivalent to --log-level=DEBUG)",
+        "--replace", action="store_true", help="Replace existing products with same ID"
     )
-
     parser.add_argument(
-        "-s",
-        "--scraper",
-        choices=["oda", "meny"],
-        help="Scraper type to use (overrides config)",
+        "--category-filter", help="Only scrape categories containing this string"
     )
-
     args = parser.parse_args()
 
     # Load environment variables
@@ -139,23 +162,144 @@ def main() -> None:
     # Load configuration
     config = load_config(args.config)
 
-    # Override scraper type if specified in command line
+    # Override scraper type if specified
     if args.scraper:
         config.scraper.type = args.scraper
 
     # Set up logging
-    log_config = config.logging
-    log_level = "DEBUG" if args.debug else (args.log_level or log_config.level)
-    setup_logging(
-        level=log_level,
-        log_file=log_config.file,
-    )
+    log_level = "DEBUG" if args.debug else config.logging.level
+    setup_logging(level=log_level, log_file=config.logging.file)
 
     logger = logging.getLogger(__name__)
-    logger.info(f"Starting scraper with {config.scraper.type} pipeline")
 
-    # Run the scraper
-    run_scraper(config, args.category, args.max_products, args.debug)
+    # Generate or use provided run ID
+    run_id = args.run_id
+    if not run_id:
+        run_id = format_run_id(generate_run_id(args.seed))
+
+    # Create the scraper
+    scraper_type = config.scraper.type
+    scraper = create_scraper(scraper_type, config)
+
+    # Create processor
+    processor = get_processor(scraper_type)
+
+    # Get categories to scrape
+    categories = get_categories(config, scraper_type, args.category)
+
+    # Filter categories if requested
+    if args.category_filter and not args.category:
+        categories = [
+            cat
+            for cat in categories
+            if args.category_filter.lower() in cat.get("name", "").lower()
+        ]
+        if not categories:
+            logger.error(f"No categories match filter: {args.category_filter}")
+            return
+
+    logger.info(f"Starting scraper with {scraper_type} scraper, run ID: {run_id}")
+    logger.info(f"Will scrape {len(categories)} categories")
+
+    total_products = 0
+
+    try:
+        # Process each category
+        for category_index, category in enumerate(categories):
+            category_name = category.get("name", "unknown")
+            category_url = category.get("url")
+
+            if not category_url:
+                logger.warning(f"Skipping category {category_name}: No URL specified")
+                continue
+
+            # Log category information
+            logger.info(
+                f"Scraping category {category_index + 1}/{len(categories)}: {category_name}"
+            )
+            logger.info(f"URL: {category_url}")
+
+            # Initialize category run tracking
+            supabase_tracker = track_run_with_supabase(
+                config,
+                f"{run_id}_{category_name}",
+                scraper_type,
+                category_name,
+                category_url,
+                args.max_products,
+                args.replace,
+            )
+
+            try:
+                # Scrape products for this category
+                products = scraper.get_products(category_url, args.max_products)
+                logger.info(f"Scraped {len(products)} products from {category_name}")
+
+                # Skip if no products found
+                if not products:
+                    logger.warning(f"No products found in category: {category_name}")
+                    continue
+
+                # Add run ID and category to all products if needed
+                for product in products:
+                    product.run_id = run_id
+                    if not product.category:
+                        product.category = category_name
+
+                # Process products
+                processed_products = processor.process_products(products)
+
+                # Save products
+                storage_type = config.storage.type
+                storage_config = config.storage.get(storage_type, {})
+                success = save_to_storage(
+                    processed_products,
+                    storage_type,
+                    storage_config,
+                    replace_existing=args.replace,
+                )
+
+                if success:
+                    logger.info(
+                        f"Successfully saved {len(processed_products)} products from {category_name}"
+                    )
+                    total_products += len(processed_products)
+                else:
+                    logger.error(f"Failed to save products from {category_name}")
+
+                    # Record failure if using run tracking
+                    if supabase_tracker:
+                        supabase_tracker.end_run(
+                            f"{run_id}_{category_name}",
+                            status="failed",
+                            error_message="Failed to save products",
+                        )
+
+            except Exception as e:
+                logger.error(
+                    f"Error processing category {category_name}: {e}", exc_info=True
+                )
+
+                # Record failure if using run tracking
+                if supabase_tracker:
+                    supabase_tracker.end_run(
+                        f"{run_id}_{category_name}",
+                        status="failed",
+                        error_message=str(e),
+                    )
+
+        # Log summary
+        logger.info(f"Scraping run {run_id} completed")
+        logger.info(
+            f"Total products scraped across {len(categories)} categories: {total_products}"
+        )
+
+    except Exception as e:
+        logger.error(f"Error during scraping: {e}", exc_info=True)
+    finally:
+        # Clean up resources
+        if "scraper" in locals():
+            scraper.close()
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 # Storage settings
 storage:
-  type: "csv"  # Options: "csv", "supabase"
+  type: "supabase"  # Options: "csv", "supabase"
   csv:
     output_dir: "data"
     filename_prefix: "products"
@@ -12,7 +12,7 @@ storage:
 # Common scraper settings
 scraper:
   # Which scraper to use: "oda" or "meny"
-  type: "meny"  #"oda"
+  type: "oda"  #"oda"
   request_delay: 0.2  # Delay between requests in seconds
   max_retries: 3
   timeout: 30
@@ -24,6 +24,8 @@ scraper:
     categories:
       - name: "meieri-ost-og-egg"
         url: "/no/categories/1283-meieri-ost-og-egg/"
+      - name: "drikke"
+        url: "/no/categories/60-drikke/"
 
   # Meny-specific settings
   meny:
