@@ -1,0 +1,35 @@
+# Test Scraper Configuration
+
+# Storage settings
+storage:
+  type: "csv"
+  csv:
+    output_dir: "test_data"
+    filename_prefix: "test_products"
+
+# Scraper settings
+scraper:
+  # ONLY use "oda" for testing
+  type: "oda"
+  request_delay: 0.2  # Explicitly set to 0.5
+  max_retries: 2
+  timeout: 15
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36"
+
+  # Oda-specific settings
+  oda:
+    base_url: "https://oda.com"
+    categories:
+      - name: "meieri-ost-og-egg"
+        url: "/no/categories/1283-meieri-ost-og-egg/"
+
+# Logging
+logging:
+  level: "INFO"  # Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+  file: "logs/test_scraper.log"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# Test specific settings
+test:
+  max_products_per_subcategory: 10
+  max_subcategories: 2  # Set to null for all subcategories

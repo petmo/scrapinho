@@ -13,7 +13,7 @@ storage:
 scraper:
   # Which scraper to use: "oda" or "meny"
   type: "meny"  #"oda"
-  request_delay: 0.5  # Delay between requests in seconds
+  request_delay: 0.2  # Delay between requests in seconds
   max_retries: 3
   timeout: 30
   user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36"

@@ -51,7 +51,7 @@ def run_scraper(
     if debug:
         logger.info("Running in DEBUG mode - more detailed logging will be displayed")
         # Reduce request delay in debug mode for faster testing
-        config.scraper.request_delay = 0.5
+        config.scraper.request_delay = 0.2
 
     # Determine which pipeline to use
     pipeline_type = config.scraper.type

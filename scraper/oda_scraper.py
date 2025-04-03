@@ -45,6 +45,7 @@ class OdaScraper(BaseScraper):
             timeout=timeout,
         )
         self.logger = logging.getLogger(__name__)
+        self.exclude_subcategories = ["Alle i Meieri, ost og egg"]
 
     def _extract_subcategories(self, category_url: str) -> List[Dict[str, str]]:
         """Extract subcategory URLs from a category page.
@@ -684,7 +685,10 @@ class OdaScraper(BaseScraper):
             # Normalize URL by removing any query parameters
             base_url = url.split("?")[0]
 
-            if base_url not in unique_urls:
+            if (
+                base_url not in unique_urls
+                and subcategory["name"] not in self.skip_subcategories
+            ):
                 unique_urls.add(base_url)
                 unique_subcategories.append(subcategory)
 
