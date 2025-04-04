@@ -2,6 +2,8 @@
 
 import re
 import logging
+import uuid
+
 import pandas as pd
 from typing import Dict, Any, List, Optional, Union
 
@@ -452,7 +454,9 @@ class OdaProcessor(BaseProcessor):
         """
         # Check required columns
         if "name" not in df.columns or "info" not in df.columns:
-            self.logger.error("DataFrame must contain 'name' and 'info' columns")
+            self.logger.error(
+                "DataFrame must contain 'name' and 'info' columns", exc_info=True
+            )
             return df
 
         # Create a dictionary for each row with extracted attributes

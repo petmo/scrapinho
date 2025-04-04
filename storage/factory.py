@@ -18,18 +18,13 @@ def save_to_storage(
         products: List of products to save
         storage_type: Type of storage ('csv' or 'supabase')
         storage_config: Storage configuration
-        replace_existing: Whether to replace existing products with same product_id
+        replace_existing: Whether to replace existing products with same ID
 
     Returns:
         True if successful, False otherwise
     """
     logger = logging.getLogger(__name__)
     logger.info(f"Saving {len(products)} products to {storage_type} storage")
-    logger.info(f"Mode: {'Replace' if replace_existing else 'Append'}")
-
-    # Additional info about the run
-    if products and products[0].run_id:
-        logger.info(f"Run ID: {products[0].run_id}")
 
     if storage_type.lower() == "csv":
         from .csv_storage import CSVStorage
@@ -48,7 +43,45 @@ def save_to_storage(
         storage.close()
         return success
     else:
-        logger.error(f"Unsupported storage type: {storage_type}")
+        logger.error(f"Unsupported storage type: {storage_type}", exc_info=True)
+        return False
+
+
+def clear_storage(storage_type: str, storage_config: dict) -> bool:
+    """Clear all data from the storage.
+
+    Args:
+        storage_type: Type of storage ('csv' or 'supabase')
+        storage_config: Storage configuration
+
+    Returns:
+        True if successful, False otherwise
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"Clearing all data from {storage_type} storage")
+
+    try:
+        if storage_type.lower() == "csv":
+            from .csv_storage import CSVStorage
+
+            storage = CSVStorage(**storage_config)
+            storage.initialize()
+            success = storage.clear_all()
+            storage.close()
+            return success
+        elif storage_type.lower() == "supabase":
+            from .supabase_storage import SupabaseStorage
+
+            storage = SupabaseStorage(**storage_config)
+            storage.initialize()
+            success = storage.clear_all()
+            storage.close()
+            return success
+        else:
+            logger.error(f"Unsupported storage type: {storage_type}", exc_info=True)
+            return False
+    except Exception as e:
+        logger.error(f"Error clearing {storage_type} storage: {e}", exc_info=True)
         return False
 
 
@@ -96,5 +129,5 @@ def get_from_storage(
         storage.close()
         return products
     else:
-        logger.error(f"Unsupported storage type: {storage_type}")
+        logger.error(f"Unsupported storage type: {storage_type}", exc_info=True)
         return []

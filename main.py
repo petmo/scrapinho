@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 from scraper import create_scraper
 from processing import get_processor
-from storage import save_to_storage
+from storage import save_to_storage, clear_storage
 from scraper.logger import setup_logging
 from utils.run_id import generate_run_id, format_run_id
 from storage.supabase_storage import SupabaseStorage
@@ -154,6 +154,12 @@ def main():
     parser.add_argument(
         "--category-filter", help="Only scrape categories containing this string"
     )
+    parser.add_argument(
+        "--clear-tables", action="store_true", help="Clear all tables before scraping"
+    )
+    parser.add_argument(
+        "--clear-only", action="store_true", help="Only clear tables without scraping"
+    )
     args = parser.parse_args()
 
     # Load environment variables
@@ -171,6 +177,25 @@ def main():
     setup_logging(level=log_level, log_file=config.logging.file)
 
     logger = logging.getLogger(__name__)
+
+    # Clear tables if requested
+    storage_type = config.storage.type
+    storage_config = config.storage.get(storage_type, {})
+
+    if args.clear_tables or args.clear_only:
+        logger.info("Clearing tables before scraping")
+        success = clear_storage(storage_type, storage_config)
+        if success:
+            logger.info("Tables cleared successfully")
+        else:
+            logger.error("Failed to clear tables", exc_info=True)
+            if args.clear_only:
+                return
+
+    # If only clearing tables was requested, exit now
+    if args.clear_only:
+        logger.info("Tables cleared. Exiting as requested.")
+        return
 
     # Generate or use provided run ID
     run_id = args.run_id
@@ -195,7 +220,9 @@ def main():
             if args.category_filter.lower() in cat.get("name", "").lower()
         ]
         if not categories:
-            logger.error(f"No categories match filter: {args.category_filter}")
+            logger.error(
+                f"No categories match filter: {args.category_filter}", exc_info=True
+            )
             return
 
     logger.info(f"Starting scraper with {scraper_type} scraper, run ID: {run_id}")
@@ -219,10 +246,13 @@ def main():
             )
             logger.info(f"URL: {category_url}")
 
-            # Initialize category run tracking
+            # Create a category-specific run ID
+            category_run_id = f"{run_id}_{category_name}"
+
+            # Initialize category run tracking with the category-specific run ID
             supabase_tracker = track_run_with_supabase(
                 config,
-                f"{run_id}_{category_name}",
+                category_run_id,
                 scraper_type,
                 category_name,
                 category_url,
@@ -240,9 +270,9 @@ def main():
                     logger.warning(f"No products found in category: {category_name}")
                     continue
 
-                # Add run ID and category to all products if needed
+                # Add run ID and category to all products - USE THE SAME CATEGORY-SPECIFIC RUN ID
                 for product in products:
-                    product.run_id = run_id
+                    product.run_id = category_run_id  # Use category-specific run ID to match tracking
                     if not product.category:
                         product.category = category_name
 
@@ -250,8 +280,6 @@ def main():
                 processed_products = processor.process_products(products)
 
                 # Save products
-                storage_type = config.storage.type
-                storage_config = config.storage.get(storage_type, {})
                 success = save_to_storage(
                     processed_products,
                     storage_type,
@@ -265,7 +293,9 @@ def main():
                     )
                     total_products += len(processed_products)
                 else:
-                    logger.error(f"Failed to save products from {category_name}")
+                    logger.error(
+                        f"Failed to save products from {category_name}", exc_info=True
+                    )
 
                     # Record failure if using run tracking
                     if supabase_tracker:

@@ -48,7 +48,9 @@ class BaseProcessor(ABC):
                 processed_product = self.process_product(product)
                 processed_products.append(processed_product)
             except Exception as e:
-                self.logger.error(f"Error processing product {product.product_id}: {e}")
+                self.logger.error(
+                    f"Error processing product {product.product_id}: {e}", exc_info=True
+                )
                 processed_products.append(product)  # Keep original product on error
 
         self.logger.info(f"Successfully processed {len(processed_products)} products")

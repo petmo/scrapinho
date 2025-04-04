@@ -23,13 +23,8 @@ def get_processor(scraper_type):
 
         return OdaProcessor()
     elif scraper_type.lower() == "meny":
-        # If you have a MenyProcessor class, use it here
-        # For now, we'll use OdaProcessor as a fallback
-        logger.warning(
-            f"No specific processor for {scraper_type}, using OdaProcessor as fallback"
-        )
-        from .oda_processor import OdaProcessor
+        from .meny_processor import MenyProcessor
 
-        return OdaProcessor()
+        return MenyProcessor()
     else:
         raise ValueError(f"Unsupported processor type for scraper: {scraper_type}")

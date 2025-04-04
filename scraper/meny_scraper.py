@@ -86,18 +86,37 @@ class MenyScraper(BaseScraper):
         product_list = soup.select_one("ul.ws-product-list-vertical")
         if product_list:
             list_items = product_list.find_all("li")
+            # Filter list items to include only those with product structure
+            valid_product_items = []
+            for item in list_items:
+                # Check for product characteristics
+                has_price = bool(item.find(string=lambda s: s and "kr" in s))
+                has_image = bool(item.find("img"))
+
+                if has_price and has_image:
+                    valid_product_items.append(item)
+
             self.logger.debug(
-                f"Found {len(list_items)} products by extracting list items from the product list"
+                f"Found {len(valid_product_items)} valid products by extracting list items from the product list"
             )
-            return list_items
+            return valid_product_items
 
         # Last resort fallbacks
-        fallback_cards = []
+        self.logger.warning(
+            "No product cards found using standard selectors, trying fallback approach"
+        )
 
+        fallback_cards = []
         # Look for any list items with product structure
         all_list_items = soup.find_all("li")
         for item in all_list_items:
-            if item.find("div", class_=lambda c: c and "product" in c.lower()):
+            product_div = item.find(
+                "div", class_=lambda c: c and "product" in c.lower()
+            )
+            has_price = bool(item.find(string=lambda s: s and "kr" in s))
+            has_image = bool(item.find("img"))
+
+            if product_div and has_price and has_image:
                 fallback_cards.append(item)
 
         if fallback_cards:
@@ -108,6 +127,40 @@ class MenyScraper(BaseScraper):
 
         self.logger.warning("No product cards found on the page")
         return []
+
+    def _parse_price(self, price_text: str) -> float:
+        """Parse a price string to extract the numeric value.
+
+        Args:
+            price_text: Price text to parse (e.g., "kr 35,30")
+
+        Returns:
+            Numeric price value
+        """
+        try:
+            # Extract numbers with currency
+            price_match = re.search(r"(?:kr|kr\s+)?(\d+[,.]\d+|\d+)", price_text)
+            if price_match:
+                # Extract the matched price and clean it
+                price_str = price_match.group(1)
+                # Replace comma with dot for decimal point
+                price_str = price_str.replace(",", ".")
+                return float(price_str)
+
+            # If pattern doesn't match, try general cleaning
+            price_text = price_text.replace("kr", "").replace("&nbsp;", " ").strip()
+            price_text = price_text.replace(",", ".")
+            # Remove any remaining non-numeric characters except dot
+            price_text = re.sub(r"[^\d.]", "", price_text)
+
+            if price_text:
+                return float(price_text)
+
+            self.logger.warning(f"Could not parse price from '{price_text}'")
+            return 0.0
+        except Exception as e:
+            self.logger.warning(f"Failed to parse price '{price_text}': {e}")
+            return 0.0
 
     def _extract_product_info_from_card(
         self, card: BeautifulSoup, category: str
@@ -137,9 +190,12 @@ class MenyScraper(BaseScraper):
                 return None
 
             product_url = name_link.get("href", "")
-            product_id = (
-                product_url.split("/")[-1] if product_url else str(uuid.uuid4())
-            )
+
+            # Extract product ID from URL or generate one
+            if "/varer/" in product_url and product_url.split("/varer/")[-1]:
+                product_id = product_url.split("/varer/")[-1].rstrip("/")
+            else:
+                product_id = str(uuid.uuid4())
 
             if product_url and not product_url.startswith(("http://", "https://")):
                 product_url = urljoin(self.base_url, product_url)
@@ -184,6 +240,10 @@ class MenyScraper(BaseScraper):
             img_elem = product_div.select_one("img")
             image_url = img_elem.get("src") if img_elem else None
 
+            # Ensure image URL is absolute
+            if image_url and not image_url.startswith(("http://", "https://")):
+                image_url = urljoin(self.base_url, image_url)
+
             return Product(
                 product_id=product_id,
                 name=name,
@@ -227,6 +287,36 @@ class MenyScraper(BaseScraper):
 
         return urljoin(self.base_url, parsed_url.path + "?" + new_query)
 
+    def _is_valid_product_url(self, url: str) -> bool:
+        """Check if a URL is a valid product URL.
+
+        Args:
+            url: URL to check
+
+        Returns:
+            True if it's a valid product URL, False otherwise
+        """
+        if not url or not isinstance(url, str):
+            return False
+
+        # Must contain /varer/ path
+        if "/varer/" not in url:
+            return False
+
+        # Exclude base category URLs and special sections
+        invalid_patterns = ["/varer/tilbud/", "/varer/nyheter/", "/varer/oppskrifter/"]
+
+        # Check for invalid patterns
+        if any(pattern in url for pattern in invalid_patterns):
+            return False
+
+        # Must have something after /varer/ - either a product ID or category
+        parts = url.split("/varer/")
+        if len(parts) < 2 or not parts[1]:
+            return False
+
+        return True
+
     def get_product(self, product_url: str) -> Optional[Product]:
         """Scrape a single product.
 
@@ -237,16 +327,19 @@ class MenyScraper(BaseScraper):
             Product object if successful, None otherwise
         """
         try:
+            # Validate URL before processing
+            if not self._is_valid_product_url(product_url):
+                self.logger.warning(f"Invalid product URL: {product_url}")
+                return None
+
             response = self._make_request(product_url)
             soup = BeautifulSoup(response.text, "lxml")
 
             # Extract product information from the product page
-            # This is a simplified implementation - for a more complete solution,
-            # you would extract all product details from the individual product page
-
-            # Generate a product ID
             product_id = (
-                product_url.split("/")[-1] if "/" in product_url else str(uuid.uuid4())
+                product_url.split("/varer/")[-1].rstrip("/")
+                if "/varer/" in product_url
+                else str(uuid.uuid4())
             )
 
             # Extract product name
@@ -257,19 +350,38 @@ class MenyScraper(BaseScraper):
             name = name_element.get_text(strip=True)
 
             # Extract price
-            price_element = soup.select_one("[itemprop='price']")
+            price_element = soup.select_one("[itemprop='price']") or soup.select_one(
+                ".ws-product-price-regular"
+            )
             if not price_element:
                 self.logger.warning(f"No price found for {name} at {product_url}")
                 return None
             price_text = price_element.get_text(strip=True)
             price = self._parse_price(price_text)
 
-            # Extract other information (simplified)
-            info_element = soup.select_one("[itemprop='description']")
+            # Extract other information
+            info_element = soup.select_one(
+                "[itemprop='description']"
+            ) or soup.select_one(".ws-product-description")
             info = info_element.get_text(strip=True) if info_element else ""
 
-            image_element = soup.select_one("[itemprop='image']")
+            # Extract image URL
+            image_element = soup.select_one("[itemprop='image']") or soup.select_one(
+                ".ws-product-image img"
+            )
             image_url = image_element.get("src") if image_element else None
+
+            # Extract brand
+            brand_element = soup.select_one("[itemprop='brand']") or soup.select_one(
+                ".ws-product-brand"
+            )
+            brand = brand_element.get_text(strip=True) if brand_element else None
+
+            # Extract category from breadcrumbs
+            category = "unknown"
+            breadcrumbs = soup.select(".breadcrumbs a")
+            if len(breadcrumbs) >= 2:  # Skip "Home" breadcrumb
+                category = breadcrumbs[1].get_text(strip=True)
 
             # Create and return the product
             return Product(
@@ -278,9 +390,10 @@ class MenyScraper(BaseScraper):
                 info=info,
                 price=price,
                 price_text=price_text,
-                unit_price=None,  # Would need to extract from product page
+                unit_price=None,  # Extract from product page if available
+                brand=brand,
                 image_url=image_url,
-                category=None,  # Would need to extract from breadcrumbs
+                category=category,
                 subcategory=None,
                 url=product_url,
             )
@@ -302,120 +415,131 @@ class MenyScraper(BaseScraper):
         Returns:
             List of scraped products
         """
-        from tqdm import tqdm
+        # Import tqdm.auto which automatically selects the best available progress bar
+        from tqdm.auto import tqdm
 
         all_products = []
 
         # Extract category name from URL
         category_parts = category_url.strip("/").split("/")
         category_name = category_parts[-1] if category_parts else "unknown"
+        # Clean up category name
+        category_name = category_name.replace("-", " ").title()
 
         try:
             # Start with page 1
             current_page = 1
+            total_pages = self.max_pages  # Default value
 
-            # Create progress bars for pages and products
-            page_progress = tqdm(
+            # Create progress bar for pages
+            with tqdm(
                 desc=f"Pages in {category_name}",
                 unit="page",
-                total=self.max_pages,
-                position=0,
-                ncols=100,
+                total=total_pages,
+                dynamic_ncols=True,  # Automatically adjust width
+                leave=True,  # Keep the progress bar after completion
                 colour="green",
-            )
+            ) as page_progress:
 
-            while current_page <= self.max_pages:
-                # Construct URL with page parameter
-                if current_page == 1:
-                    page_url = category_url
-                else:
-                    page_url = self._get_next_page_url(category_url, current_page)
+                while current_page <= self.max_pages:
+                    # Construct URL with page parameter
+                    if current_page == 1:
+                        page_url = category_url
+                    else:
+                        page_url = self._get_next_page_url(category_url, current_page)
 
-                page_progress.set_description(f"Page {current_page} of {category_name}")
-                self.logger.debug(
-                    f"Fetching page {current_page} of category '{category_name}': {page_url}"
-                )
-
-                # Get the page content
-                response = self._make_request(page_url)
-                soup = BeautifulSoup(response.text, "lxml")
-
-                # Extract product cards from this page
-                product_cards = self._extract_product_cards(soup)
-
-                # If no products found, we've reached the end
-                if not product_cards:
-                    self.logger.info(
-                        f"No more products found on page {current_page}, ending pagination"
+                    page_progress.set_description(
+                        f"Page {current_page} of {category_name}"
                     )
-                    break
-
-                # Process each product card with progress bar
-                product_progress = tqdm(
-                    total=len(product_cards),
-                    desc=f"Products on page {current_page}",
-                    unit="product",
-                    position=1,
-                    leave=False,
-                    ncols=100,
-                    colour="blue",
-                )
-
-                page_products = []
-                for card in product_cards:
-                    product = self._extract_product_info_from_card(card, category_name)
-                    if product:
-                        page_products.append(product)
-                    product_progress.update(1)
-
-                product_progress.close()
-
-                self.logger.info(
-                    f"Extracted {len(page_products)} products from page {current_page}"
-                )
-                all_products.extend(page_products)
-
-                # Check if we've reached the maximum products limit
-                if max_products is not None and len(all_products) >= max_products:
-                    self.logger.info(
-                        f"Reached maximum product limit ({max_products}), stopping pagination"
+                    self.logger.debug(
+                        f"Fetching page {current_page} of category '{category_name}': {page_url}"
                     )
-                    all_products = all_products[:max_products]
-                    break
 
-                # Check if there's a "Vis flere" (Show more) button
-                show_more_button = soup.select_one("button.ngr-button")
-                has_more_button = False
+                    # Get the page content
+                    response = self._make_request(page_url)
+                    soup = BeautifulSoup(response.text, "lxml")
 
-                if show_more_button:
-                    button_text = show_more_button.get_text(strip=True)
-                    has_more_button = "Vis flere" in button_text
-
-                if not has_more_button:
-                    # Alternative ways to detect if there are more pages
+                    # Check for pagination information
                     pagination_element = soup.select_one("[data-page]")
                     if pagination_element:
                         current_page_attr = pagination_element.get("data-page")
                         total_pages_attr = pagination_element.get("data-total-pages")
 
                         if current_page_attr and total_pages_attr:
+                            total_pages = min(int(total_pages_attr), self.max_pages)
+                            page_progress.total = total_pages
+                            page_progress.refresh()
+
+                    # Extract product cards from this page
+                    product_cards = self._extract_product_cards(soup)
+
+                    # If no products found, we've reached the end
+                    if not product_cards:
+                        self.logger.info(
+                            f"No more products found on page {current_page}, ending pagination"
+                        )
+                        break
+
+                    # Process products from this page
+                    page_products = []
+
+                    # Create progress bar for products on this page
+                    with tqdm(
+                        total=len(product_cards),
+                        desc=f"Products on page {current_page}",
+                        unit="product",
+                        leave=False,  # Remove after completion
+                        dynamic_ncols=True,
+                        colour="blue",
+                    ) as product_progress:
+
+                        for card in product_cards:
+                            product = self._extract_product_info_from_card(
+                                card, category_name
+                            )
+                            if product:
+                                page_products.append(product)
+                            product_progress.update(1)
+
+                    self.logger.info(
+                        f"Extracted {len(page_products)} products from page {current_page} of {category_name}"
+                    )
+                    all_products.extend(page_products)
+
+                    # Check if we've reached the maximum products limit
+                    if max_products is not None and len(all_products) >= max_products:
+                        self.logger.info(
+                            f"Reached maximum product limit ({max_products}), stopping pagination"
+                        )
+                        all_products = all_products[:max_products]
+                        break
+
+                    # Check if there's a "Vis flere" (Show more) button
+                    show_more_button = soup.select_one("button.ngr-button")
+                    has_more_button = False
+
+                    if show_more_button:
+                        button_text = show_more_button.get_text(strip=True)
+                        has_more_button = "Vis flere" in button_text
+
+                    if not has_more_button:
+                        # Alternative ways to detect if there are more pages
+                        if pagination_element:
                             if int(current_page_attr) >= int(total_pages_attr):
                                 self.logger.info(
                                     f"Reached last page ({current_page_attr}/{total_pages_attr})"
                                 )
                                 break
-                    else:
-                        # No pagination info found, we'll assume we're at the end
-                        self.logger.info(
-                            "No 'Vis flere' button or pagination info found, assuming last page"
-                        )
-                        break
+                        else:
+                            # No pagination info found, we'll assume we're at the end
+                            self.logger.info(
+                                "No 'Vis flere' button or pagination info found, assuming last page"
+                            )
+                            break
 
-                # Move to next page
-                current_page += 1
-                page_progress.update(1)
-
-            page_progress.close()
+                    # Move to next page
+                    current_page += 1
+                    page_progress.update(1)
 
             self.logger.info(
                 f"Total products scraped from category '{category_name}': {len(all_products)}"

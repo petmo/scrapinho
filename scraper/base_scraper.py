@@ -114,7 +114,7 @@ class BaseScraper(ABC):
             self.last_request_time = time.time()
             return response
         except requests.RequestException as e:
-            self.logger.error(f"Request to {full_url} failed: {e}")
+            self.logger.error(f"Request to {full_url} failed: {e}", exc_info=True)
             raise
 
     def close(self) -> None:

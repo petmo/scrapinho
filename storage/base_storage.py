@@ -83,6 +83,15 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
+    def clear_all(self) -> bool:
+        """Clear all data from the storage.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        pass
+
+    @abstractmethod
     def close(self) -> None:
         """Close the storage backend and release any resources."""
         pass

@@ -44,7 +44,7 @@ class CSVStorage(BaseStorage):
             Path(self.output_dir).mkdir(parents=True, exist_ok=True)
             self.logger.info(f"Initialized CSV storage in {self.output_dir}")
         except Exception as e:
-            self.logger.error(f"Failed to initialize CSV storage: {e}")
+            self.logger.error(f"Failed to initialize CSV storage: {e}", exc_info=True)
             raise
 
     def _get_current_filename(self, category: Optional[str] = None) -> str:
@@ -119,7 +119,7 @@ class CSVStorage(BaseStorage):
             self.logger.info(f"Saved {len(products)} products to CSV files")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to save products to CSV: {e}")
+            self.logger.error(f"Failed to save products to CSV: {e}", exc_info=True)
             return False
 
     def _replace_or_append_products(
@@ -217,7 +217,7 @@ class CSVStorage(BaseStorage):
                     )
             return None
         except Exception as e:
-            self.logger.error(f"Failed to get product {product_id}: {e}")
+            self.logger.error(f"Failed to get product {product_id}: {e}", exc_info=True)
             return None
 
     def get_products(
@@ -295,9 +295,45 @@ class CSVStorage(BaseStorage):
 
             return products
         except Exception as e:
-            self.logger.error(f"Failed to get products: {e}")
+            self.logger.error(f"Failed to get products: {e}", exc_info=True)
             return []
 
     def close(self) -> None:
         """Close the CSV storage backend (no-op for CSV)."""
         pass
+
+    def clear_all(self) -> bool:
+        """Clear all data from the CSV storage.
+
+        This deletes all CSV files in the output directory that match the filename prefix.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            import os
+            from pathlib import Path
+
+            # Ensure the output directory exists
+            Path(self.output_dir).mkdir(parents=True, exist_ok=True)
+
+            # Find all CSV files matching the prefix
+            csv_files = list(Path(self.output_dir).glob(f"{self.filename_prefix}*.csv"))
+
+            # Log the files that will be deleted
+            self.logger.info(f"Found {len(csv_files)} CSV files to delete")
+            for csv_file in csv_files:
+                self.logger.debug(f"Deleting file: {csv_file}")
+                try:
+                    os.remove(csv_file)
+                except Exception as e:
+                    self.logger.error(
+                        f"Error deleting file {csv_file}: {e}", exc_info=True
+                    )
+                    # Continue with other files even if one fails
+
+            self.logger.info(f"Cleared all CSV files in {self.output_dir}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to clear CSV storage: {e}", exc_info=True)
+            return False

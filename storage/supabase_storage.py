@@ -67,7 +67,9 @@ class SupabaseStorage(BaseStorage):
                 self.logger.warning("Make sure database tables are properly set up")
 
         except Exception as e:
-            self.logger.error(f"Failed to initialize Supabase storage: {e}")
+            self.logger.error(
+                f"Failed to initialize Supabase storage: {e}", exc_info=True
+            )
             raise
 
     def start_run(
@@ -93,7 +95,7 @@ class SupabaseStorage(BaseStorage):
             True if successful, False otherwise
         """
         if not self.client:
-            self.logger.error("Supabase client not initialized")
+            self.logger.error("Supabase client not initialized", exc_info=True)
             return False
 
         try:
@@ -112,7 +114,9 @@ class SupabaseStorage(BaseStorage):
             self.logger.info(f"Started scraping run: {run_id}")
             return True
         except Exception as e:
-            self.logger.error(f"Failed to record start of run {run_id}: {e}")
+            self.logger.error(
+                f"Failed to record start of run {run_id}: {e}", exc_info=True
+            )
             return False
 
     def end_run(
@@ -138,52 +142,86 @@ class SupabaseStorage(BaseStorage):
             return False
 
         try:
-            # Get current time with timezone to match PostgreSQL's TIMESTAMPTZ
+            # Get current time with timezone
             end_time = datetime.datetime.now(datetime.timezone.utc)
 
-            # Get the start time
+            # Try to get the run record
             response = (
                 self.client.table(self.runs_table_name)
                 .select("start_time")
                 .eq("run_id", run_id)
                 .execute()
             )
+
+            # If not found by exact match, try to find a related run
             if not response.data:
-                self.logger.error(f"Run ID {run_id} not found")
+                self.logger.debug(
+                    f"Run ID {run_id} not found, trying to find a related run"
+                )
+
+                # Try to find by base run_id (without category suffix)
+                if "_" in run_id:
+                    base_run_id = run_id.split("_")[0]
+                    if len(base_run_id) >= 8:  # Make sure it's meaningful
+                        response = (
+                            self.client.table(self.runs_table_name)
+                            .select("run_id", "start_time")
+                            .like("run_id", f"{base_run_id}%")
+                            .execute()
+                        )
+
+                        if response.data:
+                            # Use the first matching run
+                            run_id = response.data[0]["run_id"]
+                            self.logger.info(f"Found related run: {run_id}")
+                        else:
+                            self.logger.warning(f"No related run found for {run_id}")
+                            # Create a new run record
+                            self.start_run(
+                                run_id, "unknown", "unknown", replace_existing=False
+                            )
+                            return self.end_run(
+                                run_id, status, num_products, error_message
+                            )
+
+            if not response.data:
+                self.logger.error(
+                    f"Run ID {run_id} not found and could not find related run"
+                )
                 return False
 
-            # Parse the start time from the database
+            # Parse the start time (with dateutil for robustness)
+            from dateutil import parser
+
             start_time_str = response.data[0]["start_time"]
 
-            # Make sure to parse it as a timezone-aware datetime
-            # If the format includes timezone info (ends with +00:00 or Z)
-            if "Z" in start_time_str or "+" in start_time_str:
-                start_time = datetime.datetime.fromisoformat(
-                    start_time_str.replace("Z", "+00:00")
-                )
-            else:
-                # If no timezone in string, assume UTC
-                start_time = datetime.datetime.fromisoformat(start_time_str).replace(
-                    tzinfo=datetime.timezone.utc
-                )
-
-            # Now both datetimes have timezone info and can be subtracted
-            duration_seconds = int((end_time - start_time).total_seconds())
-
+            # Prepare update data
             run_data = {
                 "status": status,
                 "end_time": end_time.isoformat(),
-                "duration_seconds": duration_seconds,
                 "num_products": num_products,
             }
 
+            # Try to calculate duration
+            try:
+                start_time = parser.parse(start_time_str)
+                if start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=datetime.timezone.utc)
+
+                duration_seconds = int((end_time - start_time).total_seconds())
+                run_data["duration_seconds"] = duration_seconds
+            except Exception as e:
+                self.logger.warning(f"Could not calculate duration: {e}")
+
+            # Add error message if provided
             if error_message:
                 run_data["error_message"] = error_message
 
+            # Update the run record
             self.client.table(self.runs_table_name).update(run_data).eq(
                 "run_id", run_id
             ).execute()
-            self.logger.info(f"Ended scraping run: {run_id} with status: {status}")
+            self.logger.info(f"Updated run status for {run_id}: {status}")
             return True
         except Exception as e:
             self.logger.error(f"Failed to record end of run {run_id}: {e}")
@@ -227,9 +265,20 @@ class SupabaseStorage(BaseStorage):
             for product in products:
                 product_dict = product.to_dict()
 
-                # Convert attributes to JSON string for Supabase
+                # Important: Don't convert attributes to JSON string - send as native dictionary
+                # This ensures proper JSONB handling in Supabase
                 if isinstance(product_dict["attributes"], dict):
-                    product_dict["attributes"] = json.dumps(product_dict["attributes"])
+                    # Keep attributes as a native dictionary
+                    pass
+                elif isinstance(product_dict["attributes"], str):
+                    # If it's already a string, parse it back to a dictionary
+                    try:
+                        product_dict["attributes"] = json.loads(
+                            product_dict["attributes"]
+                        )
+                    except json.JSONDecodeError:
+                        # If parsing fails, use an empty dict
+                        product_dict["attributes"] = {}
 
                 product_dicts.append(product_dict)
 
@@ -271,15 +320,23 @@ class SupabaseStorage(BaseStorage):
                         f"No new products to insert (all {len(product_ids)} already exist)"
                     )
 
-            # Update the run statistics if we have a run ID
             if products and products[0].run_id:
-                self.end_run(
-                    products[0].run_id, status="completed", num_products=len(products)
-                )
+                # Try to find a matching run ID in the database
+                matching_run_id = self._find_matching_run_id(products[0].run_id)
+                if matching_run_id:
+                    self.end_run(
+                        matching_run_id, status="completed", num_products=len(products)
+                    )
+                else:
+                    self.logger.warning(
+                        f"No matching run found for ID: {products[0].run_id}"
+                    )
 
             return True
         except Exception as e:
-            self.logger.error(f"Failed to save products to Supabase: {e}")
+            self.logger.error(
+                f"Failed to save products to Supabase: {e}", exc_info=True
+            )
 
             # Try to update run status if we have a run ID
             if products and products[0].run_id:
@@ -311,13 +368,20 @@ class SupabaseStorage(BaseStorage):
             if result.data and len(result.data) > 0:
                 product_dict = result.data[0]
 
-                # Parse attributes if it's a JSON string
+                # Properly handle attributes
                 attributes = {}
                 if "attributes" in product_dict and product_dict["attributes"]:
-                    if isinstance(product_dict["attributes"], str):
-                        attributes = json.loads(product_dict["attributes"])
-                    else:
+                    if isinstance(product_dict["attributes"], dict):
+                        # Already a dictionary, use as is
                         attributes = product_dict["attributes"]
+                    elif isinstance(product_dict["attributes"], str):
+                        # Try to parse JSON string
+                        try:
+                            attributes = json.loads(product_dict["attributes"])
+                        except json.JSONDecodeError:
+                            self.logger.warning(
+                                f"Failed to parse attributes JSON for product {product_id}"
+                            )
 
                 return Product(
                     product_id=product_dict["product_id"],
@@ -339,7 +403,7 @@ class SupabaseStorage(BaseStorage):
                 )
             return None
         except Exception as e:
-            self.logger.error(f"Failed to get product {product_id}: {e}")
+            self.logger.error(f"Failed to get product {product_id}: {e}", exc_info=True)
             return None
 
     def get_products(
@@ -381,13 +445,31 @@ class SupabaseStorage(BaseStorage):
 
             products = []
             for item in result.data:
-                # Parse attributes if it's a JSON string
+                # Properly handle attributes - either as dict or parse from JSON string
                 attributes = {}
                 if "attributes" in item and item["attributes"]:
-                    if isinstance(item["attributes"], str):
-                        attributes = json.loads(item["attributes"])
-                    else:
+                    if isinstance(item["attributes"], dict):
                         attributes = item["attributes"]
+                    elif isinstance(item["attributes"], str):
+                        try:
+                            attributes = json.loads(item["attributes"])
+                        except json.JSONDecodeError:
+                            self.logger.warning(
+                                f"Failed to parse attributes for product {item.get('product_id')}"
+                            )
+
+                # Parse scraped_at with timezone handling
+                if "scraped_at" in item and item["scraped_at"]:
+                    if item["scraped_at"].endswith("Z"):
+                        # Handle UTC time ending with Z
+                        scraped_at = datetime.datetime.fromisoformat(
+                            item["scraped_at"].replace("Z", "+00:00")
+                        )
+                    else:
+                        # Regular ISO format
+                        scraped_at = datetime.datetime.fromisoformat(item["scraped_at"])
+                else:
+                    scraped_at = datetime.datetime.now(datetime.timezone.utc)
 
                 products.append(
                     Product(
@@ -403,16 +485,149 @@ class SupabaseStorage(BaseStorage):
                         subcategory=item.get("subcategory"),
                         url=item.get("url"),
                         attributes=attributes,
-                        scraped_at=datetime.datetime.fromisoformat(item["scraped_at"]),
+                        scraped_at=scraped_at,
                         run_id=item.get("run_id"),
                     )
                 )
             return products
         except Exception as e:
-            self.logger.error(f"Failed to get products: {e}")
+            self.logger.error(f"Failed to get products: {e}", exc_info=True)
             return []
 
     def close(self) -> None:
         """Close the Supabase client and release resources."""
         self.client = None
         self.logger.info("Closed Supabase connection")
+
+    def clear_all(self) -> bool:
+        """Clear all data from the Supabase tables, respecting foreign key constraints.
+
+        This method first clears child tables, then parent tables to avoid constraint violations.
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not self.client:
+            self.logger.error("Supabase client not initialized")
+            return False
+
+        try:
+            # Keep track of overall success
+            success = True
+
+            # Step 1: Get all run IDs to track deletion progress
+            try:
+                response = (
+                    self.client.table(self.runs_table_name).select("run_id").execute()
+                )
+                if response.data:
+                    run_ids = [item["run_id"] for item in response.data]
+                    self.logger.info(f"Found {len(run_ids)} run IDs to delete")
+                else:
+                    run_ids = []
+                    self.logger.info("No run IDs found in the database")
+            except Exception as e:
+                self.logger.warning(f"Failed to retrieve run IDs: {e}")
+                run_ids = []
+
+            # Step 2: Clear product_prices table FIRST (child table that depends on products)
+            try:
+                prices_table = "product_prices"
+                self.logger.info(f"Clearing {prices_table} table")
+                # Delete using a valid WHERE clause
+                self.client.table(prices_table).delete().gte("id", 0).execute()
+                self.logger.info(f"Successfully cleared {prices_table} table")
+            except Exception as e:
+                self.logger.warning(f"Failed to clear {prices_table} table: {e}")
+                # Continue with other tables even if this fails
+
+            # Step 3: Clear products table (now safe since child table is cleared)
+            try:
+                self.logger.info(f"Clearing {self.table_name} table")
+                # Delete using valid WHERE clause
+                self.client.table(self.table_name).delete().neq(
+                    "product_id", "no-match-placeholder"
+                ).execute()
+                self.logger.info(f"Successfully cleared {self.table_name} table")
+            except Exception as e:
+                self.logger.error(f"Failed to clear {self.table_name} table: {e}")
+                success = False
+
+            # Step 4: Clear scraping_runs table
+            try:
+                self.logger.info(f"Clearing {self.runs_table_name} table")
+                if run_ids:
+                    self.logger.info(f"Deleting {len(run_ids)} run records")
+                    # If we have run IDs, log them and delete
+                    self.client.table(self.runs_table_name).delete().in_(
+                        "run_id", run_ids
+                    ).execute()
+                else:
+                    # Otherwise just delete everything
+                    self.client.table(self.runs_table_name).delete().neq(
+                        "run_id", "no-match-placeholder"
+                    ).execute()
+                self.logger.info(f"Successfully cleared {self.runs_table_name} table")
+            except Exception as e:
+                self.logger.error(f"Failed to clear {self.runs_table_name} table: {e}")
+                success = False
+
+            return success
+        except Exception as e:
+            self.logger.error(f"Failed to clear Supabase tables: {e}")
+            return False
+
+    def _find_matching_run_id(self, run_id: str) -> Optional[str]:
+        """Find a matching run ID in the database.
+
+        This handles cases where the product's run_id might not exactly match
+        the one in the scraping_runs table (e.g., if a category suffix was added).
+
+        Args:
+            run_id: The run ID to look for
+
+        Returns:
+            The matching run ID from the database, or None if not found
+        """
+        if not self.client:
+            return None
+
+        try:
+            # First try exact match
+            response = (
+                self.client.table(self.runs_table_name)
+                .select("run_id")
+                .eq("run_id", run_id)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]["run_id"]
+
+            # If not found, try finding a run_id that contains our run_id as a prefix
+            # This handles cases where products have the base run_id but the run was created with category suffix
+            base_id = run_id.split("_")[0]  # Get just the date part or UUID part
+            if len(base_id) >= 8:  # Make sure it's long enough to be meaningful
+                response = (
+                    self.client.table(self.runs_table_name)
+                    .select("run_id")
+                    .like("run_id", f"{base_id}%")
+                    .execute()
+                )
+                if response.data:
+                    return response.data[0]["run_id"]
+
+            # If not found, try as a suffix (if base run_id was used for the run but products have category-specific IDs)
+            if "_" in run_id:
+                response = (
+                    self.client.table(self.runs_table_name)
+                    .select("run_id")
+                    .like("run_id", f"%{run_id}")
+                    .execute()
+                )
+                if response.data:
+                    return response.data[0]["run_id"]
+
+            return None
+        except Exception as e:
+            self.logger.error(f"Error finding matching run ID: {e}")
+            return None
