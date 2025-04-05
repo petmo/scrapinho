@@ -242,7 +242,7 @@ class SupabaseStorage(BaseStorage):
     def save_products(
         self, products: List[Product], replace_existing: bool = False
     ) -> bool:
-        """Save multiple products to Supabase.
+        """Save multiple products to Supabase using chunking to handle large batches.
 
         Args:
             products: The list of products to save
@@ -259,88 +259,154 @@ class SupabaseStorage(BaseStorage):
             self.logger.error("Supabase client not initialized")
             return False
 
+        # Track the run ID for later
+        run_id = products[0].run_id if products else None
+
+        # Track success
+        overall_success = True
+
         try:
-            # Convert products to dictionaries
-            product_dicts = []
-            for product in products:
-                product_dict = product.to_dict()
+            # Save products in chunks to avoid payload size limits
+            chunk_size = 50  # A conservative size that should work with most payloads
+            total_chunks = (len(products) + chunk_size - 1) // chunk_size
 
-                # Important: Don't convert attributes to JSON string - send as native dictionary
-                # This ensures proper JSONB handling in Supabase
-                if isinstance(product_dict["attributes"], dict):
-                    # Keep attributes as a native dictionary
-                    pass
-                elif isinstance(product_dict["attributes"], str):
-                    # If it's already a string, parse it back to a dictionary
-                    try:
-                        product_dict["attributes"] = json.loads(
-                            product_dict["attributes"]
-                        )
-                    except json.JSONDecodeError:
-                        # If parsing fails, use an empty dict
-                        product_dict["attributes"] = {}
-
-                product_dicts.append(product_dict)
-
-            # Upsert or insert based on replace_existing flag
-            if replace_existing:
-                # Upsert data to Supabase (insert or update based on product_id)
-                result = (
-                    self.client.table(self.table_name)
-                    .upsert(product_dicts, on_conflict=["product_id"])
-                    .execute()
-                )
-                self.logger.info(f"Upserted {len(products)} products to Supabase")
-            else:
-                # Check if products already exist (to avoid unintentionally overwriting)
-                product_ids = [p["product_id"] for p in product_dicts]
-                existing = (
-                    self.client.table(self.table_name)
-                    .select("product_id")
-                    .in_("product_id", product_ids)
-                    .execute()
-                )
-
-                existing_ids = [item["product_id"] for item in existing.data]
-                new_products = [
-                    p for p in product_dicts if p["product_id"] not in existing_ids
-                ]
-
-                if new_products:
-                    result = (
-                        self.client.table(self.table_name)
-                        .insert(new_products)
-                        .execute()
-                    )
-                    self.logger.info(
-                        f"Inserted {len(new_products)} new products to Supabase"
-                    )
-                else:
-                    self.logger.info(
-                        f"No new products to insert (all {len(product_ids)} already exist)"
-                    )
-
-            if products and products[0].run_id:
-                # Try to find a matching run ID in the database
-                matching_run_id = self._find_matching_run_id(products[0].run_id)
-                if matching_run_id:
-                    self.end_run(
-                        matching_run_id, status="completed", num_products=len(products)
-                    )
-                else:
-                    self.logger.warning(
-                        f"No matching run found for ID: {products[0].run_id}"
-                    )
-
-            return True
-        except Exception as e:
-            self.logger.error(
-                f"Failed to save products to Supabase: {e}", exc_info=True
+            self.logger.info(
+                f"Saving {len(products)} products in {total_chunks} chunks of {chunk_size}"
             )
 
+            # Process each chunk
+            for i in range(0, len(products), chunk_size):
+                chunk = products[i : i + chunk_size]
+                chunk_num = (i // chunk_size) + 1
+
+                try:
+                    # Convert products to dictionaries
+                    product_dicts = []
+                    for product in chunk:
+                        try:
+                            product_dict = product.to_dict()
+
+                            # Ensure attributes is a dictionary, not a string
+                            if isinstance(product_dict["attributes"], dict):
+                                # Already a dict, good
+                                pass
+                            elif isinstance(product_dict["attributes"], str):
+                                # Try to parse JSON string
+                                try:
+                                    product_dict["attributes"] = json.loads(
+                                        product_dict["attributes"]
+                                    )
+                                except json.JSONDecodeError:
+                                    # If parsing fails, use an empty dict
+                                    product_dict["attributes"] = {}
+                            else:
+                                # Something unexpected, use empty dict
+                                product_dict["attributes"] = {}
+
+                            product_dicts.append(product_dict)
+                        except Exception as e:
+                            self.logger.warning(
+                                f"Error converting product to dict: {e}"
+                            )
+                            # Skip this product but continue with others
+
+                    if not product_dicts:
+                        self.logger.warning(
+                            f"Chunk {chunk_num}/{total_chunks} had no valid products"
+                        )
+                        continue
+
+                    self.logger.info(
+                        f"Processing chunk {chunk_num}/{total_chunks} with {len(product_dicts)} products"
+                    )
+
+                    # Upsert or insert based on replace_existing flag
+                    if replace_existing:
+                        # Upsert data to Supabase (insert or update based on product_id)
+                        result = (
+                            self.client.table(self.table_name)
+                            .upsert(product_dicts, on_conflict=["product_id"])
+                            .execute()
+                        )
+                        self.logger.info(
+                            f"Upserted {len(product_dicts)} products in chunk {chunk_num}"
+                        )
+                    else:
+                        # Check if products already exist (to avoid unintentionally overwriting)
+                        product_ids = [p["product_id"] for p in product_dicts]
+
+                        # Split into smaller batches for the query too
+                        id_batch_size = 100
+                        existing_ids = set()
+
+                        for j in range(0, len(product_ids), id_batch_size):
+                            id_batch = product_ids[j : j + id_batch_size]
+                            existing = (
+                                self.client.table(self.table_name)
+                                .select("product_id")
+                                .in_("product_id", id_batch)
+                                .execute()
+                            )
+                            existing_ids.update(
+                                item["product_id"] for item in existing.data
+                            )
+
+                        # Filter out existing products
+                        new_products = [
+                            p
+                            for p in product_dicts
+                            if p["product_id"] not in existing_ids
+                        ]
+
+                        if new_products:
+                            result = (
+                                self.client.table(self.table_name)
+                                .insert(new_products)
+                                .execute()
+                            )
+                            self.logger.info(
+                                f"Inserted {len(new_products)} new products in chunk {chunk_num}"
+                            )
+                        else:
+                            self.logger.info(
+                                f"No new products to insert in chunk {chunk_num}"
+                            )
+
+                except Exception as e:
+                    self.logger.error(f"Failed to save chunk {chunk_num}: {e}")
+                    overall_success = False
+                    # Continue with next chunk despite error
+
+            # Update the run statistics if we have a run ID
+            if overall_success and run_id:
+                try:
+                    # Try to find a matching run ID in the database
+                    matching_run_id = self._find_matching_run_id(run_id)
+                    if matching_run_id:
+                        self.end_run(
+                            matching_run_id,
+                            status="completed",
+                            num_products=len(products),
+                        )
+                except Exception as e:
+                    self.logger.error(f"Failed to update run statistics: {e}")
+                    # Don't affect overall success for run statistics failure
+
+            return overall_success
+        except Exception as e:
+            self.logger.error(f"Failed to save products to Supabase: {e}")
+
             # Try to update run status if we have a run ID
-            if products and products[0].run_id:
-                self.end_run(products[0].run_id, status="failed", error_message=str(e))
+            if run_id:
+                try:
+                    matching_run_id = self._find_matching_run_id(run_id)
+                    if matching_run_id:
+                        self.end_run(
+                            matching_run_id, status="failed", error_message=str(e)
+                        )
+                except Exception as e:
+                    self.logger.error(f"Failed to update run statistics: {e}")
+                    pass  # Ignore errors in failure handling
 
             return False
 
@@ -605,16 +671,18 @@ class SupabaseStorage(BaseStorage):
 
             # If not found, try finding a run_id that contains our run_id as a prefix
             # This handles cases where products have the base run_id but the run was created with category suffix
-            base_id = run_id.split("_")[0]  # Get just the date part or UUID part
-            if len(base_id) >= 8:  # Make sure it's long enough to be meaningful
-                response = (
-                    self.client.table(self.runs_table_name)
-                    .select("run_id")
-                    .like("run_id", f"{base_id}%")
-                    .execute()
-                )
-                if response.data:
-                    return response.data[0]["run_id"]
+            parts = run_id.split("_")
+            if len(parts) >= 1:
+                base_id = parts[0]  # Get just the date part or UUID part
+                if len(base_id) >= 8:  # Make sure it's long enough to be meaningful
+                    response = (
+                        self.client.table(self.runs_table_name)
+                        .select("run_id")
+                        .like("run_id", f"{base_id}%")
+                        .execute()
+                    )
+                    if response.data:
+                        return response.data[0]["run_id"]
 
             # If not found, try as a suffix (if base run_id was used for the run but products have category-specific IDs)
             if "_" in run_id:

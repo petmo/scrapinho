@@ -495,6 +495,9 @@ class OdaScraper(BaseScraper):
             # Extract image URL
             image_url = self._extract_product_image(soup, name, product_url)
 
+            if name == "Tine Lettmelk":
+                print("ho")
+
             # Create and return product
             return Product(
                 product_id=product_id,

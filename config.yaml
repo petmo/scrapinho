@@ -24,8 +24,8 @@ scraper:
     categories:
       - name: "meieri-ost-og-egg"
         url: "/no/categories/1283-meieri-ost-og-egg/"
-      - name: "drikke"
-        url: "/no/categories/60-drikke/"
+      #- name: "drikke"
+      #  url: "/no/categories/60-drikke/"
 
   # Meny-specific settings
   meny:
