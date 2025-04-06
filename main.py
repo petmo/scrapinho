@@ -155,7 +155,9 @@ def main():
         "--category-filter", help="Only scrape categories containing this string"
     )
     parser.add_argument(
-        "--clear-tables", action="store_true", help="Clear all tables before scraping"
+        "--clear-tables",
+        action="store_true",
+        help="Clear all tables before saving to database",
     )
     parser.add_argument(
         "--clear-only", action="store_true", help="Only clear tables without scraping"
@@ -178,23 +180,16 @@ def main():
 
     logger = logging.getLogger(__name__)
 
-    # Clear tables if requested
-    storage_type = config.storage.type
-    storage_config = config.storage.get(storage_type, {})
-
-    if args.clear_tables or args.clear_only:
-        logger.info("Clearing tables before scraping")
+    # Handle clear-only option separately (clear tables and exit)
+    if args.clear_only:
+        logger.info("Clearing tables only as requested")
+        storage_type = config.storage.type
+        storage_config = config.storage.get(storage_type, {})
         success = clear_storage(storage_type, storage_config)
         if success:
             logger.info("Tables cleared successfully")
         else:
             logger.error("Failed to clear tables", exc_info=True)
-            if args.clear_only:
-                return
-
-    # If only clearing tables was requested, exit now
-    if args.clear_only:
-        logger.info("Tables cleared. Exiting as requested.")
         return
 
     # Generate or use provided run ID
@@ -229,6 +224,7 @@ def main():
     logger.info(f"Will scrape {len(categories)} categories")
 
     total_products = 0
+    all_scraped_products = []  # Store all scraped products for all categories
 
     try:
         # Process each category
@@ -249,17 +245,6 @@ def main():
             # Create a category-specific run ID
             category_run_id = f"{run_id}_{category_name}"
 
-            # Initialize category run tracking with the category-specific run ID
-            supabase_tracker = track_run_with_supabase(
-                config,
-                category_run_id,
-                scraper_type,
-                category_name,
-                category_url,
-                args.max_products,
-                args.replace,
-            )
-
             try:
                 # Scrape products for this category
                 products = scraper.get_products(category_url, args.max_products)
@@ -279,44 +264,67 @@ def main():
                 # Process products
                 processed_products = processor.process_products(products)
 
-                # Save products
-                success = save_to_storage(
-                    processed_products,
-                    storage_type,
-                    storage_config,
-                    replace_existing=args.replace,
+                # Add to the collection of all scraped products
+                all_scraped_products.extend(processed_products)
+                logger.info(
+                    f"Added {len(processed_products)} products from {category_name} to queue. Total: {len(all_scraped_products)}"
                 )
-
-                if success:
-                    logger.info(
-                        f"Successfully saved {len(processed_products)} products from {category_name}"
-                    )
-                    total_products += len(processed_products)
-                else:
-                    logger.error(
-                        f"Failed to save products from {category_name}", exc_info=True
-                    )
-
-                    # Record failure if using run tracking
-                    if supabase_tracker:
-                        supabase_tracker.end_run(
-                            f"{run_id}_{category_name}",
-                            status="failed",
-                            error_message="Failed to save products",
-                        )
 
             except Exception as e:
                 logger.error(
                     f"Error processing category {category_name}: {e}", exc_info=True
                 )
 
+        # Once all categories are scraped, save everything to storage
+
+        # First clear tables if requested
+        storage_type = config.storage.type
+        storage_config = config.storage.get(storage_type, {})
+
+        if args.clear_tables:
+            logger.info("Clearing tables before saving data")
+            success = clear_storage(storage_type, storage_config)
+            if success:
+                logger.info("Tables cleared successfully")
+            else:
+                logger.error("Failed to clear tables", exc_info=True)
+
+        # Initialize run tracking with the main run ID right before saving
+        supabase_tracker = track_run_with_supabase(
+            config,
+            run_id,
+            scraper_type,
+            "multiple_categories",
+            "multiple_urls",
+            None,  # max_products
+            args.replace,
+        )
+
+        # Save all products
+        if all_scraped_products:
+            logger.info(f"Saving {len(all_scraped_products)} products to storage")
+            success = save_to_storage(
+                all_scraped_products,
+                storage_type,
+                storage_config,
+                replace_existing=args.replace,
+            )
+
+            if success:
+                logger.info(f"Successfully saved {len(all_scraped_products)} products")
+                total_products = len(all_scraped_products)
+            else:
+                logger.error("Failed to save products", exc_info=True)
+
                 # Record failure if using run tracking
                 if supabase_tracker:
                     supabase_tracker.end_run(
-                        f"{run_id}_{category_name}",
+                        run_id,
                         status="failed",
-                        error_message=str(e),
+                        error_message="Failed to save products",
                     )
+        else:
+            logger.warning("No products to save")
 
         # Log summary
         logger.info(f"Scraping run {run_id} completed")

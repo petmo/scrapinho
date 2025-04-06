@@ -45,7 +45,7 @@ class OdaScraper(BaseScraper):
             timeout=timeout,
         )
         self.logger = logging.getLogger(__name__)
-        self.skip_subcategories = ["Alle i Meieri, ost og egg", "Alle i Drikke"]
+        self.skip_subcategories_marker = "Alle i "
 
     def _extract_subcategories(self, category_url: str) -> List[Dict[str, str]]:
         """Extract subcategory URLs from a category page.
@@ -379,144 +379,6 @@ class OdaScraper(BaseScraper):
             self.logger.warning(f"Failed to parse price '{price_text}': {e}")
             return 0.0
 
-    def _extract_product_info(
-        self,
-        soup: BeautifulSoup,
-        product_url: str,
-        category: Optional[str] = None,
-        subcategory: Optional[str] = None,
-    ) -> Optional[Product]:
-        """Extract product information from a product page.
-
-        Args:
-            soup: BeautifulSoup object of the product page
-            product_url: URL of the product page
-            category: Product category
-            subcategory: Product subcategory
-
-        Returns:
-            Product object if successful, None otherwise
-        """
-        try:
-            # Generate a unique ID for the product (in a real implementation,
-            # you would extract this from the page or URL)
-            product_id = str(uuid.uuid4())
-
-            # Extract product name
-            name_element = soup.select_one("h2")
-            if not name_element:
-                self.logger.warning(f"No product name found at {product_url}")
-                return None
-            name = name_element.get_text(strip=True)
-
-            # Extract product info (brand, size)
-            info_element = soup.select_one("p.k-text-style--body-s")
-            info = info_element.get_text(strip=True) if info_element else ""
-
-            # Extract price - try multiple selectors
-            price_element = None
-            # Try multiple selectors for price elements
-            price_selectors = [
-                "span.k-text-style--label-m.k-text--weight-bold",  # Bold label is often price
-                "span.k-text-color--default",  # Default color text often contains price
-                "div.price span",  # Generic price span
-                "span[class*='price']",  # Any span with 'price' in class
-                "span.k-text-style--label-m",  # Fallback to any label-m span
-            ]
-
-            for selector in price_selectors:
-                elements = soup.select(selector)
-                for element in elements:
-                    text = element.get_text(strip=True)
-                    # Check if the text contains currency symbol or digits
-                    if "kr" in text or re.search(r"\d", text):
-                        price_element = element
-                        break
-                if price_element:
-                    break
-
-            # If still not found, try looking for elements containing currency
-            if not price_element:
-                for elem in soup.find_all(["span", "div", "p"]):
-                    text = elem.get_text(strip=True)
-                    if "kr" in text and re.search(r"\d", text):
-                        price_element = elem
-                        break
-
-            # If no price found through selectors, try XPath-like approach
-            if not price_element:
-                # Look for elements in the product card's price section
-                article = soup.find("article")
-                if article:
-                    divs = article.find_all("div")
-                    # Price is often in the second div or nested deeper
-                    for div in divs:
-                        spans = div.find_all("span")
-                        for span in spans:
-                            text = span.get_text(strip=True)
-                            if "kr" in text and re.search(r"\d", text):
-                                price_element = span
-                                break
-
-            if not price_element:
-                self.logger.warning(f"No price found for {name} at {product_url}")
-                self.logger.debug(
-                    f"HTML structure around product card: {soup.find('article')}"
-                )
-                return None
-
-            price_text = price_element.get_text(strip=True)
-            price = self._parse_price(price_text)
-
-            # Extract unit price with similar fallback approach
-            unit_price_element = None
-            unit_price_selectors = [
-                "p.k-text-style--label-s.k-text-color--subdued",  # Typical unit price style
-                "p.k-text-style--label-s",  # Any small label text
-                "p[class*='subdued']",  # Any subdued paragraph
-                "span[class*='unit']",  # Any span with 'unit' in class
-            ]
-
-            for selector in unit_price_selectors:
-                elements = soup.select(selector)
-                for element in elements:
-                    text = element.get_text(strip=True)
-                    # Unit prices typically contain "/" character (e.g., kr/kg)
-                    if "/" in text and "kr" in text:
-                        unit_price_element = element
-                        break
-                if unit_price_element:
-                    break
-
-            unit_price = (
-                unit_price_element.get_text(strip=True) if unit_price_element else None
-            )
-
-            # Extract image URL
-            image_url = self._extract_product_image(soup, name, product_url)
-
-            if name == "Tine Lettmelk":
-                print("ho")
-
-            # Create and return product
-            return Product(
-                product_id=product_id,
-                name=name,
-                info=info,
-                price=price,
-                price_text=price_text,
-                unit_price=unit_price,
-                image_url=image_url,
-                category=category,
-                subcategory=subcategory,
-                url=product_url,
-            )
-        except Exception as e:
-            self.logger.error(
-                f"Failed to extract product info from {product_url}: {e}", exc_info=True
-            )
-            return None
-
     def get_product(self, product_url: str) -> Optional[Product]:
         """Scrape a single product.
 
@@ -652,6 +514,7 @@ class OdaScraper(BaseScraper):
                             category=category,
                             subcategory=subcategory_name,
                         )
+
                         if product:
                             products.append(product)
                     except Exception as e:
@@ -727,7 +590,7 @@ class OdaScraper(BaseScraper):
 
             if (
                 base_url not in unique_urls
-                and subcategory["name"] not in self.skip_subcategories
+                and self.skip_subcategories_marker not in subcategory["name"]
             ):
                 unique_urls.add(base_url)
                 unique_subcategories.append(subcategory)
@@ -786,6 +649,232 @@ class OdaScraper(BaseScraper):
         )
         return all_products
 
+    def _extract_product_id_from_url(self, product_url: str) -> str:
+        """Extract a product ID from the product URL.
+
+        Args:
+            product_url: URL of the product page
+
+        Returns:
+            Product ID in the format 'oda_1131-q-q-melk-lett-1'
+        """
+        # Extract the part after '/products/'
+        parts = product_url.split("/products/")
+        if len(parts) < 2 or not parts[1]:
+            # If we can't extract from URL, generate a UUID as fallback
+            return f"oda_{str(uuid.uuid4())}"
+
+        # Remove trailing slashes and query parameters
+        product_part = parts[1].rstrip("/")
+        if "?" in product_part:
+            product_part = product_part.split("?")[0]
+
+        return f"oda_{product_part}"
+
+    def _extract_product_info(
+        self,
+        soup: BeautifulSoup,
+        product_url: str,
+        category: Optional[str] = None,
+        subcategory: Optional[str] = None,
+    ) -> Optional[Product]:
+        """Extract product information from a product page.
+
+        Args:
+            soup: BeautifulSoup object of the product page
+            product_url: URL of the product page
+            category: Product category
+            subcategory: Product subcategory
+
+        Returns:
+            Product object if successful, None otherwise
+        """
+        try:
+            # Extract product ID from URL
+            product_id = self._extract_product_id_from_url(product_url)
+
+            # Extract product name
+            # XPath: /html/body/div/div[3]/main/div[1]/div/div[2]/div[2]/h1
+            # Try specific selectors for main product section
+            name_element = None
+
+            # Try to find the main product section first
+            main_elem = soup.find("main")
+            if main_elem:
+                # Look for h1 within the main product info section
+                name_element = main_elem.find("h1")
+
+            # Fallback to any h1 or h2 if not found
+            if not name_element:
+                name_element = soup.find("h1") or soup.find("h2")
+
+            if not name_element:
+                self.logger.warning(f"No product name found at {product_url}")
+                return None
+
+            name = name_element.get_text(strip=True)
+
+            # Extract product info (brand, size)
+            # XPath: /html/body/div/div[3]/main/div[1]/div/div[2]/div[2]/p
+            info_element = None
+
+            # Look for the p element that comes immediately after h1 in the same container
+            if name_element and name_element.parent:
+                # Find paragraphs within the same parent container as the h1
+                info_elements = name_element.parent.find_all("p")
+                if info_elements:
+                    # The first paragraph is likely the product info
+                    info_element = info_elements[0]
+
+            # Fallback to class-based selector
+            if not info_element:
+                info_element = soup.select_one("p.k-text-style--body-s")
+
+            info = info_element.get_text(strip=True) if info_element else ""
+
+            # Extract price
+            # XPath: /html/body/div/div[3]/main/div[1]/div/div[2]/div[2]/div[4]/div/div/span
+            price_element = None
+
+            # Look for price near the product name
+            if name_element and name_element.parent:
+                parent_elem = name_element.parent
+
+                # Find spans with "kr" in the text
+                spans = parent_elem.find_all("span")
+                for span in spans:
+                    if "kr" in span.get_text(strip=True) and re.search(
+                        r"\d", span.get_text(strip=True)
+                    ):
+                        price_element = span
+                        break
+
+                # If not found in direct spans, try divs that might contain price
+                if not price_element:
+                    price_divs = parent_elem.find_all("div")
+                    for div in price_divs:
+                        price_text = div.get_text(strip=True)
+                        if "kr" in price_text and re.search(r"\d", price_text):
+                            price_spans = div.find_all("span")
+                            if price_spans:
+                                # Use the span that contains the price
+                                for span in price_spans:
+                                    span_text = span.get_text(strip=True)
+                                    if "kr" in span_text and re.search(
+                                        r"\d", span_text
+                                    ):
+                                        price_element = span
+                                        break
+
+            # Fallbacks if still not found
+            if not price_element:
+                # Try multiple selectors for price elements
+                price_selectors = [
+                    "span.k-text-style--label-m.k-text--weight-bold",
+                    "span.k-text-color--default",
+                    "div.price span",
+                    "span[class*='price']",
+                    "span.k-text-style--label-m",
+                ]
+
+                for selector in price_selectors:
+                    elements = soup.select(selector)
+                    for element in elements:
+                        text = element.get_text(strip=True)
+                        if "kr" in text and re.search(r"\d", text):
+                            price_element = element
+                            break
+                    if price_element:
+                        break
+
+                # If still not found, try looking for elements containing currency
+                if not price_element:
+                    for elem in soup.find_all(["span", "div", "p"]):
+                        text = elem.get_text(strip=True)
+                        if "kr" in text and re.search(r"\d", text):
+                            price_element = elem
+                            break
+
+            if not price_element:
+                self.logger.warning(f"No price found for {name} at {product_url}")
+                return None
+
+            price_text = price_element.get_text(strip=True)
+            price = self._parse_price(price_text)
+
+            # Extract unit price
+            # XPath: /html/body/div/div[3]/main/div[1]/div/div[2]/div[2]/div[4]/div/p
+            unit_price_element = None
+
+            # Look for unit price near the price element
+            if price_element:
+                # Look at siblings or parent's children
+                parent = price_element.parent
+                if parent:
+                    # Look for paragraphs near the price
+                    unit_price_candidates = parent.find_all("p")
+                    for p in unit_price_candidates:
+                        text = p.get_text(strip=True)
+                        if "/" in text and "kr" in text:
+                            unit_price_element = p
+                            break
+
+                    # If not found in direct children, look in parent's parent
+                    if not unit_price_element and parent.parent:
+                        unit_price_candidates = parent.parent.find_all("p")
+                        for p in unit_price_candidates:
+                            text = p.get_text(strip=True)
+                            if "/" in text and "kr" in text:
+                                unit_price_element = p
+                                break
+
+            # Fallback to class-based selectors
+            if not unit_price_element:
+                unit_price_selectors = [
+                    "p.k-text-style--label-s.k-text-color--subdued",
+                    "p.k-text-style--label-s",
+                    "p[class*='subdued']",
+                    "span[class*='unit']",
+                ]
+
+                for selector in unit_price_selectors:
+                    elements = soup.select(selector)
+                    for element in elements:
+                        text = element.get_text(strip=True)
+                        if "/" in text and "kr" in text:
+                            unit_price_element = element
+                            break
+                    if unit_price_element:
+                        break
+
+            unit_price = (
+                self._parse_price(unit_price_element.get_text(strip=True))
+                if unit_price_element
+                else None
+            )
+
+            # Extract image URL
+            image_url = self._extract_product_image(soup, name, product_url)
+
+            # Create and return product
+            return Product(
+                product_id=product_id,
+                name=name,
+                info=info,
+                price=price,
+                price_text=price_text,
+                unit_price=unit_price,
+                image_url=image_url,
+                category=category,
+                subcategory=subcategory,
+                url=product_url,
+            )
+        except Exception as e:
+            self.logger.error(
+                f"Failed to extract product info from {product_url}: {e}", exc_info=True
+            )
+            return None
+
     def _extract_product_image(
         self, soup: BeautifulSoup, product_name: str, product_url: str
     ) -> Optional[str]:
@@ -804,16 +893,20 @@ class OdaScraper(BaseScraper):
         # Initialize
         image_element = None
 
-        # Strategy 1: Target the exact structure where product images are found
-        article_elem = soup.find("article")
-        if article_elem:
-            # First div inside article usually has the product image
-            first_div = article_elem.select_one("div:first-child")
-            if first_div:
-                image_element = first_div.find("img")
-            # Fallback to any div in article if first-child selector doesn't work
-            if not image_element and article_elem.find("div"):
-                image_element = article_elem.find("div").find("img")
+        # Strategy 1: Use the precise XPath for main product image
+        # XPath: /html/body/div/div[3]/main/div[1]/div/div[2]/div[1]/div/div[1]/div/div/div/div/img
+        main_elem = soup.find("main")
+        if main_elem:
+            # Find the first major section in main that likely contains product image
+            main_sections = main_elem.find_all("div", recursive=False)
+            if main_sections:
+                first_section = main_sections[0]
+                # Find images within this section
+                images = first_section.find_all("img")
+                if images:
+                    image_element = images[
+                        0
+                    ]  # The first image is likely the main product image
 
         # Strategy 2: Look for images with matching alt text to product name
         if not image_element and product_name:
@@ -823,7 +916,19 @@ class OdaScraper(BaseScraper):
                     image_element = img
                     break
 
-        # Strategy 3: Look for images with product-related classes
+        # Strategy 3: Target the exact structure where product images are found (fallback)
+        if not image_element:
+            article_elem = soup.find("article")
+            if article_elem:
+                # First div inside article usually has the product image
+                first_div = article_elem.select_one("div:first-child")
+                if first_div:
+                    image_element = first_div.find("img")
+                # Fallback to any div in article if first-child selector doesn't work
+                if not image_element and article_elem.find("div"):
+                    image_element = article_elem.find("div").find("img")
+
+        # Strategy 4: Look for images with product-related classes
         if not image_element:
             for img_selector in [
                 "img.k-image.k-image--contain",
@@ -835,7 +940,7 @@ class OdaScraper(BaseScraper):
                 if image_element:
                     break
 
-        # Strategy 4: Try direct CSS path based on XPath structure
+        # Strategy 5: Try direct CSS path based on XPath structure
         if not image_element:
             css_selectors = [
                 "section > div > div > article > div > img",
